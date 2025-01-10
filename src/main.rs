@@ -16,7 +16,7 @@ static ADDRESS: [&str; 8] = [
 static SPEED: AtomicUsize = AtomicUsize::new(0);
 static DOWNLOADED: AtomicUsize = AtomicUsize::new(0);
 static DOWNLOADING: AtomicUsize = AtomicUsize::new(0);
-static mut BEST: Vec<u8> = Vec::new();
+static mut BEST: String = String::new();
 
 #[derive(Parser)]
 struct Args {
@@ -45,17 +45,17 @@ async fn main() {
 
     let client = Arc::new(reqwest::Client::new());
 
+    if !args.url.is_empty() {
+        unsafe {
+            BEST = args.url.clone();
+        }
+    } else {
+        println!("正在寻找最佳下载地址...");
+        find_best().await;
+    }
+
     loop {
         if DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed) < args.concurrency {
-            if !args.url.is_empty() {
-                unsafe {
-                    BEST = args.url.as_bytes().to_vec();
-                }
-            } else {
-                println!("正在寻找最佳下载地址...");
-                find_best().await;
-            }
-
             for _ in DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed)..args.concurrency {
                 spawn(downloader(client.clone(), args.ua.clone()));
                 DOWNLOADING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -74,7 +74,9 @@ async fn main() {
                 1024.0 /
                 1024.0 /
                 1024.0,
-            String::from_utf8(unsafe { BEST.clone() }).unwrap()
+            unsafe {
+                &BEST
+            }
         );
     }
 }
@@ -91,7 +93,7 @@ async fn find_best() {
     output.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
     unsafe {
-        BEST = output[0].0.as_bytes().to_vec();
+        BEST = output[0].0.clone();
     }
 }
 
@@ -115,8 +117,8 @@ async fn test(address: String) -> (String, u128) {
 async fn downloader(client: Arc<reqwest::Client>, ua: String) {
     loop {
         let mut res = client
-            .get(String::from_utf8(unsafe { BEST.clone() }).unwrap())
-            .header("User-Agent", ua.clone())
+            .get(unsafe { &BEST })
+            .header("User-Agent", &ua)
             .send().await
             .unwrap();
 
