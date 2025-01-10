@@ -106,9 +106,9 @@ jobs:
           retention-days: 30
           path: ${{ env.archive_file }}
 
-      - name: Publish release
+      - name: Publish release Windows
         uses: softprops/action-gh-release@v2.0.6
-        if: ${{ startsWith(github.ref_name, 'v') }}
+        if: ${{ startsWith(github.ref_name, 'v') }} && ${{ contains(matrix.target, 'windows') }}
         with:
           draft: false
           tag_name: ${{ github.ref_name }}
@@ -116,3 +116,16 @@ jobs:
             ${{ env.archive_file }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE_FILE: SpeedTest-${{ matrix.target }}.exe
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2.0.6
+        if: ${{ startsWith(github.ref_name, 'v') }} && ${{ !contains(matrix.target, 'windows') }}
+        with:
+          draft: false
+          tag_name: ${{ github.ref_name }}
+          files: |
+            ${{ env.archive_file }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCHIVE_FILE: SpeedTest-${{ matrix.target }}
