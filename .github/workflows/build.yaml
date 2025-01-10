@@ -86,8 +86,21 @@ jobs:
           cp target/${{ matrix.target }}/release/SpeedTest.exe SpeedTest-${{ matrix.target }}.exe
         shell: bash
 
+      - name: Upload artifact Windows
+        uses: actions/upload-artifact@v4
+        if: ${{ contains(matrix.target, 'windows') }}
+        env:
+          ARCHIVE_FILE: SpeedTest-${{ matrix.target }}.exe
+        with:
+          name: SpeedTest-${{ matrix.target }}
+          retention-days: 30
+          path: ${{ env.archive_file }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
+        if: ${{ !contains(matrix.target, 'windows') }}
+        env:
+          ARCHIVE_FILE: SpeedTest-${{ matrix.target }}
         with:
           name: SpeedTest-${{ matrix.target }}
           retention-days: 30
