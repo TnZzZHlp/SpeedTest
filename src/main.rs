@@ -1,8 +1,8 @@
 use clap::Parser;
-use std::{ io::{ self, Write }, sync::{ atomic::AtomicUsize, Arc }, time::Duration };
+use std::{ sync::{ atomic::AtomicUsize, Arc }, time::Duration };
 use tokio::{ spawn, task::JoinSet };
 
-static ADDRESS: [&str; 8] = [
+static ADDRESS: [&str; 10] = [
     "https://download.alicdn.com/wireless/taobao4android/latest/taobao4android_703304.apk",
     "https://dldir1.qq.com/qqfile/qq/TIM3.5.0/TIM3.5.0.22143.exe",
     "https://res.app.coc.10086.cn/downfile/apk/CM10086_android_V11.4.0_20241023213523371.apk",
@@ -10,6 +10,8 @@ static ADDRESS: [&str; 8] = [
     "https://cloud.video.taobao.com/play/u/null/p/1/e/6/t/1/d/ud/329682839911.mp4",
     "https://e890f2fd0e182ec52eb7bae54f5fd897.b.hon.cc.cdnhwc8.com:32590/appdl-1-drcn.dbankcdn.com/dl/appdl/application/apk/a2/a2088eec037441b89156fe405d41c761/PC661608e54be346009a87ff4923a609e5.2409091528.exe",
     "https://ctyun-portal.gdoss.xstore.ctyun.cn/download/ctyun.apk",
+    "https://dl.hdslb.com/mobile/fixed/bili_win/bili_win-install.exe",
+    "https://www.douyin.com/download/pc/obj/douyin-pc-web/douyin-pc-client/7044145585217083655/releases/12270856/5.3.1/win32-ia32/douyin-downloader-v5.3.1-win32-ia32-douyincold.exe",
     "https://speed.cloudflare.com/__down?bytes=1000000000",
 ];
 
@@ -65,15 +67,19 @@ async fn main() {
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         let downloaded = SPEED.swap(0, std::sync::atomic::Ordering::Relaxed);
         DOWNLOADED.fetch_add(downloaded, std::sync::atomic::Ordering::Relaxed);
-        io::stdout().flush().unwrap(); // 刷新标准输出缓冲区
-        print!(
-            "\r当前下载速度：{:6.2} MB/s {:4.0}Mbps 已下载：{:6.2} GB 当前下载地址：{}",
+
+        // 清屏
+        print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
+
+        println!(
+            "当前下载速度: {:.2} MB/s {:.0}Mbps\n已下载: {:.2} GB\n当前下载线程数: {} \n当前下载地址: {}",
             (downloaded as f64) / 1024.0 / 1024.0,
             ((downloaded as f64) / 1024.0 / 1024.0) * 8.0,
             (DOWNLOADED.load(std::sync::atomic::Ordering::Relaxed) as f64) /
                 1024.0 /
                 1024.0 /
                 1024.0,
+            DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed),
             unsafe {
                 &BEST
             }
