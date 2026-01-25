@@ -1,6 +1,9 @@
 use clap::Parser;
-use std::{ sync::{ atomic::AtomicUsize, Arc }, time::Duration };
-use tokio::{ spawn, task::JoinSet };
+use std::{
+    sync::{atomic::AtomicUsize, Arc},
+    time::Duration,
+};
+use tokio::{spawn, task::JoinSet};
 
 static ADDRESS: [&str; 10] = [
     "https://download.alicdn.com/wireless/taobao4android/latest/taobao4android_703304.apk",
@@ -104,7 +107,10 @@ async fn find_best() {
 }
 
 async fn test(address: String) -> (String, u128) {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
 
     let now = std::time::Instant::now();
 
@@ -125,7 +131,8 @@ async fn downloader(client: Arc<reqwest::Client>, ua: String) {
         let mut res = client
             .get(unsafe { &BEST })
             .header("User-Agent", &ua)
-            .send().await
+            .send()
+            .await
             .unwrap();
 
         loop {
