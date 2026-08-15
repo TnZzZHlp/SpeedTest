@@ -1,6 +1,9 @@
 use clap::Parser;
 use std::{
-    sync::{atomic::AtomicUsize, Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering::Relaxed},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 use tokio::{spawn, task::JoinSet};
@@ -91,20 +94,20 @@ async fn main() {
         *BEST.lock().unwrap() = args.url.clone();
     } else {
         println!("正在寻找最佳下载地址...");
-        find_best(&addresses).await;
+        find_best(&client, &addresses).await;
     }
 
     loop {
-        if DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed) < args.concurrency {
-            for _ in DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed)..args.concurrency {
+        if DOWNLOADING.load(Relaxed) < args.concurrency {
+            for _ in DOWNLOADING.load(Relaxed)..args.concurrency {
                 spawn(downloader(client.clone(), args.ua.clone(), addresses.clone()));
-                DOWNLOADING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                DOWNLOADING.fetch_add(1, Relaxed);
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-        let downloaded = SPEED.swap(0, std::sync::atomic::Ordering::Relaxed);
-        DOWNLOADED.fetch_add(downloaded, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let downloaded = SPEED.swap(0, Relaxed);
+        DOWNLOADED.fetch_add(downloaded, Relaxed);
 
         // 清屏
         print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
@@ -117,18 +120,18 @@ async fn main() {
                 1024.0 /
                 1024.0 /
                 1024.0,
-            DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed),
+            DOWNLOADING.load(Relaxed),
             group_name,
             BEST.lock().unwrap()
         );
     }
 }
 
-async fn find_best(addresses: &[&'static str]) {
+async fn find_best(client: &reqwest::Client, addresses: &[&'static str]) {
     let mut tasks = JoinSet::new();
 
     for target in addresses {
-        tasks.spawn(test(target.to_string()));
+        tasks.spawn(test(client.clone(), target.to_string()));
     }
 
     let mut output = tasks.join_all().await;
@@ -138,23 +141,17 @@ async fn find_best(addresses: &[&'static str]) {
     *BEST.lock().unwrap() = output[0].0.clone();
 }
 
-async fn test(address: String) -> (String, u128) {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
+async fn test(client: reqwest::Client, address: String) -> (String, u128) {
     let now = std::time::Instant::now();
 
-    match client.get(&address).send().await {
-        Ok(res) => {
-            if res.status().is_success() {
-                (address, now.elapsed().as_millis())
-            } else {
-                (address, u128::MAX)
-            }
-        }
-        Err(_) => (address, u128::MAX),
+    match client
+        .get(&address)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(res) if res.status().is_success() => (address, now.elapsed().as_millis()),
+        _ => (address, u128::MAX),
     }
 }
 
@@ -175,13 +172,13 @@ async fn downloader(
         loop {
             match res.chunk().await {
                 Ok(Some(chunk)) => {
-                    SPEED.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed);
+                    SPEED.fetch_add(chunk.len(), Relaxed);
                 }
                 Ok(None) => {
                     break;
                 }
                 Err(_) => {
-                    find_best(&addresses).await;
+                    find_best(&client, &addresses).await;
                     return;
                 }
             }
