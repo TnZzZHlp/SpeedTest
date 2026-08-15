@@ -23,8 +23,20 @@ static MAINLAND_ADDRESS: [&str; 9] = [
 
 /// 海外测速地址
 /// Cloudflare 端点限制单次请求 < 100MB, 超出返回 403
-static OVERSEAS_ADDRESS: [&str; 1] =
-    ["https://speed.cloudflare.com/__down?bytes=99999999"];
+static OVERSEAS_ADDRESS: [&str; 8] = [
+    // 全球(Anycast)
+    "https://speed.cloudflare.com/__down?bytes=99999999",
+    // 欧洲
+    "https://proof.ovh.net/files/100Mb.dat",
+    "https://speedtest.london.linode.com/100MB-london.bin",
+    // 亚太
+    "https://speedtest.singapore.linode.com/100MB-singapore.bin",
+    "https://speedtest.tokyo2.linode.com/100MB-tokyo2.bin",
+    // 北美
+    "https://speedtest.newark.linode.com/100MB-newark.bin",
+    "https://speedtest.fremont.linode.com/100MB-fremont.bin",
+    "https://speedtest.dallas.linode.com/100MB-dallas.bin",
+];
 
 static SPEED: AtomicUsize = AtomicUsize::new(0);
 static DOWNLOADED: AtomicUsize = AtomicUsize::new(0);
