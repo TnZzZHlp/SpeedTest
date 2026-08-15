@@ -1,11 +1,12 @@
 use clap::Parser;
 use std::{
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{atomic::AtomicUsize, Arc, Mutex},
     time::Duration,
 };
 use tokio::{spawn, task::JoinSet};
 
-static ADDRESS: [&str; 10] = [
+/// 国内测速地址
+static MAINLAND_ADDRESS: [&str; 9] = [
     "https://download.alicdn.com/wireless/taobao4android/latest/taobao4android_703304.apk",
     "https://dldir1.qq.com/qqfile/qq/TIM3.5.0/TIM3.5.0.22143.exe",
     "https://res.app.coc.10086.cn/downfile/apk/CM10086_android_V11.4.0_20241023213523371.apk",
@@ -15,30 +16,42 @@ static ADDRESS: [&str; 10] = [
     "https://ctyun-portal.gdoss.xstore.ctyun.cn/download/ctyun.apk",
     "https://dl.hdslb.com/mobile/fixed/bili_win/bili_win-install.exe",
     "https://www.douyin.com/download/pc/obj/douyin-pc-web/douyin-pc-client/7044145585217083655/releases/12270856/5.3.1/win32-ia32/douyin-downloader-v5.3.1-win32-ia32-douyincold.exe",
-    "https://speed.cloudflare.com/__down?bytes=1000000000",
 ];
+
+/// 海外测速地址
+static OVERSEAS_ADDRESS: [&str; 1] =
+    ["https://speed.cloudflare.com/__down?bytes=1000000000"];
 
 static SPEED: AtomicUsize = AtomicUsize::new(0);
 static DOWNLOADED: AtomicUsize = AtomicUsize::new(0);
 static DOWNLOADING: AtomicUsize = AtomicUsize::new(0);
-static mut BEST: String = String::new();
+static BEST: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Parser)]
+#[command(name = "SpeedTest", version, about = "多线程网络测速工具")]
 struct Args {
-    /// 下载地址
-    #[clap(short, long, default_value = "")]
+    /// 自定义下载地址(指定后优先于 --mainland/--overseas)
+    #[arg(short, long, default_value = "")]
     url: String,
 
     /// 线程数
-    #[clap(short, long, default_value = "16")]
+    #[arg(short, long, default_value_t = 16)]
     concurrency: usize,
 
     /// User-Agent
-    #[clap(
+    #[arg(
         long,
         default_value = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0"
     )]
     ua: String,
+
+    /// 使用国内测速地址(默认分组)
+    #[arg(long)]
+    mainland: bool,
+
+    /// 使用海外测速地址
+    #[arg(long)]
+    overseas: bool,
 }
 #[tokio::main]
 async fn main() {
@@ -48,21 +61,42 @@ async fn main() {
         panic!("线程数不合法");
     }
 
+    // 按 --mainland/--overseas 选择测速分组, 未指定时默认使用国内地址
+    let mut addresses: Vec<&'static str> = Vec::new();
+    if args.mainland {
+        addresses.extend(MAINLAND_ADDRESS);
+    }
+    if args.overseas {
+        addresses.extend(OVERSEAS_ADDRESS);
+    }
+    if addresses.is_empty() {
+        addresses.extend(MAINLAND_ADDRESS);
+    }
+
+    let group_name = if !args.url.is_empty() {
+        "自定义地址"
+    } else if args.mainland && args.overseas {
+        "国内 + 海外"
+    } else if args.overseas {
+        "海外"
+    } else {
+        "国内"
+    };
+
     let client = Arc::new(reqwest::Client::new());
+    let addresses = Arc::new(addresses);
 
     if !args.url.is_empty() {
-        unsafe {
-            BEST = args.url.clone();
-        }
+        *BEST.lock().unwrap() = args.url.clone();
     } else {
         println!("正在寻找最佳下载地址...");
-        find_best().await;
+        find_best(&addresses).await;
     }
 
     loop {
         if DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed) < args.concurrency {
             for _ in DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed)..args.concurrency {
-                spawn(downloader(client.clone(), args.ua.clone()));
+                spawn(downloader(client.clone(), args.ua.clone(), addresses.clone()));
                 DOWNLOADING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -75,7 +109,7 @@ async fn main() {
         print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 
         println!(
-            "当前下载速度: {:.2} MB/s {:.0}Mbps\n已下载: {:.2} GB\n当前下载线程数: {} \n当前下载地址: {}",
+            "当前下载速度: {:.2} MB/s {:.0}Mbps\n已下载: {:.2} GB\n当前下载线程数: {} \n测速分组: {}\n当前下载地址: {}",
             (downloaded as f64) / 1024.0 / 1024.0,
             ((downloaded as f64) / 1024.0 / 1024.0) * 8.0,
             (DOWNLOADED.load(std::sync::atomic::Ordering::Relaxed) as f64) /
@@ -83,17 +117,16 @@ async fn main() {
                 1024.0 /
                 1024.0,
             DOWNLOADING.load(std::sync::atomic::Ordering::Relaxed),
-            unsafe {
-                &BEST
-            }
+            group_name,
+            BEST.lock().unwrap()
         );
     }
 }
 
-async fn find_best() {
+async fn find_best(addresses: &[&'static str]) {
     let mut tasks = JoinSet::new();
 
-    for target in ADDRESS {
+    for target in addresses {
         tasks.spawn(test(target.to_string()));
     }
 
@@ -101,9 +134,7 @@ async fn find_best() {
 
     output.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-    unsafe {
-        BEST = output[0].0.clone();
-    }
+    *BEST.lock().unwrap() = output[0].0.clone();
 }
 
 async fn test(address: String) -> (String, u128) {
@@ -126,10 +157,15 @@ async fn test(address: String) -> (String, u128) {
     }
 }
 
-async fn downloader(client: Arc<reqwest::Client>, ua: String) {
+async fn downloader(
+    client: Arc<reqwest::Client>,
+    ua: String,
+    addresses: Arc<Vec<&'static str>>,
+) {
     loop {
+        let best = BEST.lock().unwrap().clone();
         let mut res = client
-            .get(unsafe { &BEST })
+            .get(best)
             .header("User-Agent", &ua)
             .send()
             .await
@@ -144,7 +180,7 @@ async fn downloader(client: Arc<reqwest::Client>, ua: String) {
                     break;
                 }
                 Err(_) => {
-                    find_best().await;
+                    find_best(&addresses).await;
                     return;
                 }
             }
