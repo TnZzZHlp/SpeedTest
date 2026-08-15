@@ -19,8 +19,9 @@ static MAINLAND_ADDRESS: [&str; 9] = [
 ];
 
 /// 海外测速地址
+/// Cloudflare 端点限制单次请求 < 100MB, 超出返回 403
 static OVERSEAS_ADDRESS: [&str; 1] =
-    ["https://speed.cloudflare.com/__down?bytes=1000000000"];
+    ["https://speed.cloudflare.com/__down?bytes=99999999"];
 
 static SPEED: AtomicUsize = AtomicUsize::new(0);
 static DOWNLOADED: AtomicUsize = AtomicUsize::new(0);
