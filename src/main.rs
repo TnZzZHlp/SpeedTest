@@ -162,12 +162,20 @@ async fn downloader(
 ) {
     loop {
         let best = BEST.lock().unwrap().clone();
-        let mut res = client
+        let mut res = match client
             .get(best)
             .header("User-Agent", &ua)
             .send()
             .await
-            .unwrap();
+        {
+            Ok(res) => res,
+            Err(_) => {
+                // 连接失败: 重新选优后退出, 主循环会补位新线程
+                find_best(&client, &addresses).await;
+                DOWNLOADING.fetch_sub(1, Relaxed);
+                return;
+            }
+        };
 
         loop {
             match res.chunk().await {
@@ -178,7 +186,9 @@ async fn downloader(
                     break;
                 }
                 Err(_) => {
+                    // 连接中断: 重新选优后退出, 主循环会补位新线程
                     find_best(&client, &addresses).await;
+                    DOWNLOADING.fetch_sub(1, Relaxed);
                     return;
                 }
             }
