@@ -1,12 +1,15 @@
+mod ui;
+
 use clap::Parser;
 use std::{
+    io::{self, IsTerminal, Write},
     sync::{
-        atomic::{AtomicUsize, Ordering::Relaxed},
-        Arc, Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
+        Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::{spawn, task::JoinSet};
+use tokio::task::JoinSet;
 
 /// 国内测速地址
 static MAINLAND_ADDRESS: [&str; 9] = [
@@ -38,9 +41,8 @@ static OVERSEAS_ADDRESS: [&str; 8] = [
     "https://speedtest.dallas.linode.com/100MB-dallas.bin",
 ];
 
-static SPEED: AtomicUsize = AtomicUsize::new(0);
-static DOWNLOADED: AtomicUsize = AtomicUsize::new(0);
-static DOWNLOADING: AtomicUsize = AtomicUsize::new(0);
+static DOWNLOADED: AtomicU64 = AtomicU64::new(0);
+static ERRORS: AtomicUsize = AtomicUsize::new(0);
 static BEST: Mutex<String> = Mutex::new(String::new());
 
 #[derive(Parser)]
@@ -68,28 +70,33 @@ struct Args {
     /// 使用海外测速地址
     #[arg(long)]
     overseas: bool,
+
+    /// 使用纯文本命令行界面(支持重定向)
+    #[arg(long, conflicts_with = "tui")]
+    cli: bool,
+
+    /// 强制使用 TUI 界面(需要交互终端)
+    #[arg(long)]
+    tui: bool,
 }
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
     if args.concurrency == 0 {
-        panic!("线程数不合法");
+        return Err("并发数必须大于 0".into());
     }
-
-    // 按 --mainland/--overseas 选择测速分组, 未指定时默认使用国内地址
-    let mut addresses: Vec<&'static str> = Vec::new();
-    if args.mainland {
-        addresses.extend(MAINLAND_ADDRESS);
+    if !args.url.is_empty() {
+        let url = reqwest::Url::parse(&args.url)?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err("下载地址必须是有效的 HTTP 或 HTTPS URL".into());
+        }
     }
-    if args.overseas {
-        addresses.extend(OVERSEAS_ADDRESS);
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    if args.tui && !interactive {
+        return Err("TUI 需要交互终端，请使用 --cli".into());
     }
-    if addresses.is_empty() {
-        addresses.extend(MAINLAND_ADDRESS);
-    }
-
-    let group_name = if !args.url.is_empty() {
+    let use_tui = !args.cli && interactive;
+    let group = if !args.url.is_empty() {
         "自定义地址"
     } else if args.mainland && args.overseas {
         "国内 + 海外"
@@ -98,64 +105,116 @@ async fn main() {
     } else {
         "国内"
     };
-
-    let client = Arc::new(reqwest::Client::new());
-    let addresses = Arc::new(addresses);
-
-    if !args.url.is_empty() {
-        *BEST.lock().unwrap() = args.url.clone();
-    } else {
-        println!("正在寻找最佳下载地址...");
-        find_best(&client, &addresses).await;
+    let client = reqwest::Client::builder()
+        .user_agent(&args.ua)
+        .connect_timeout(Duration::from_secs(5))
+        .read_timeout(Duration::from_secs(15))
+        .build()?;
+    let mut terminal = if use_tui { Some(ui::Tui::new()?) } else { None };
+    let mut dashboard = ui::Dashboard::new(group, args.concurrency);
+    let measurement = measure(client, &args);
+    tokio::pin!(measurement);
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+    let mut tick = tokio::time::interval(Duration::from_millis(100));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut started = None;
+    let mut sampled = Instant::now();
+    if !use_tui {
+        writeln!(io::stdout(), "正在寻找最佳下载地址... (Ctrl+C 退出)")?;
     }
 
     loop {
-        if DOWNLOADING.load(Relaxed) < args.concurrency {
-            for _ in DOWNLOADING.load(Relaxed)..args.concurrency {
-                spawn(downloader(client.clone(), args.ua.clone(), addresses.clone()));
-                DOWNLOADING.fetch_add(1, Relaxed);
+        tokio::select! {
+            result = &mut measurement => { result?; break; }
+            result = &mut shutdown => { result?; break; }
+            _ = tick.tick() => {
+                if let Some(terminal) = terminal.as_mut() {
+                    if terminal.should_quit()? { break; }
+                }
+                dashboard.address = BEST.lock().unwrap().clone();
+                dashboard.errors = ERRORS.load(Relaxed);
+                let now = Instant::now();
+                if !dashboard.address.is_empty() && started.is_none() {
+                    started = Some(now);
+                    sampled = now;
+                }
+                let interval = now.duration_since(sampled);
+                if let Some(start) = started {
+                    if interval >= Duration::from_secs(1) {
+                        dashboard.sample(DOWNLOADED.load(Relaxed), now - start, interval);
+                        sampled = now;
+                        if !use_tui {
+                            writeln!(io::stdout(), "{}", dashboard.cli_line())?;
+                        }
+                    }
+                }
+                if let Some(terminal) = terminal.as_mut() {
+                    terminal.draw(&dashboard)?;
+                }
             }
         }
-
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let downloaded = SPEED.swap(0, Relaxed);
-        DOWNLOADED.fetch_add(downloaded, Relaxed);
-
-        // 清屏
-        print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
-
-        println!(
-            "当前下载速度: {:.2} MB/s {:.0}Mbps\n已下载: {:.2} GB\n当前下载线程数: {} \n测速分组: {}\n当前下载地址: {}",
-            (downloaded as f64) / 1024.0 / 1024.0,
-            ((downloaded as f64) / 1024.0 / 1024.0) * 8.0,
-            (DOWNLOADED.load(std::sync::atomic::Ordering::Relaxed) as f64) /
-                1024.0 /
-                1024.0 /
-                1024.0,
-            DOWNLOADING.load(Relaxed),
-            group_name,
-            BEST.lock().unwrap()
-        );
     }
+    Ok(())
 }
 
-async fn find_best(client: &reqwest::Client, addresses: &[&'static str]) {
-    let mut tasks = JoinSet::new();
-
-    for target in addresses {
-        tasks.spawn(test(client.clone(), target.to_string()));
+async fn measure(client: reqwest::Client, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    let mut addresses = Vec::new();
+    if !args.url.is_empty() {
+        addresses.push(args.url.clone());
+        *BEST.lock().unwrap() = args.url.clone();
+    } else {
+        if args.mainland || !args.overseas {
+            addresses.extend(MAINLAND_ADDRESS.map(String::from));
+        }
+        if args.overseas {
+            addresses.extend(OVERSEAS_ADDRESS.map(String::from));
+        }
+        find_best(&client, &addresses).await?;
     }
 
-    let mut output = tasks.join_all().await;
+    // JoinSet 在退出时取消全部下载，避免后台任务脱离界面生命周期。
+    let mut workers = JoinSet::new();
+    for _ in 0..args.concurrency {
+        workers.spawn(downloader(client.clone()));
+    }
+    while let Some(result) = workers.join_next().await {
+        result?;
+        ERRORS.fetch_add(1, Relaxed);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if args.url.is_empty() {
+            find_best(&client, &addresses).await?;
+        }
+        workers.spawn(downloader(client.clone()));
+    }
+    Ok(())
+}
 
-    output.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-
-    *BEST.lock().unwrap() = output[0].0.clone();
+async fn find_best(client: &reqwest::Client, addresses: &[String]) -> io::Result<()> {
+    let mut tasks = JoinSet::new();
+    for target in addresses {
+        tasks.spawn(test(client.clone(), target.clone()));
+    }
+    let mut best = None;
+    while let Some(result) = tasks.join_next().await {
+        let (address, latency) = result.map_err(io::Error::other)?;
+        if latency != u128::MAX && best.as_ref().is_none_or(|(_, time)| latency < *time) {
+            best = Some((address, latency));
+        }
+    }
+    match best {
+        Some((address, _)) => {
+            *BEST.lock().unwrap() = address;
+            Ok(())
+        }
+        None => Err(io::Error::other(
+            "没有可用的测速地址，请使用 --url 指定地址",
+        )),
+    }
 }
 
 async fn test(client: reqwest::Client, address: String) -> (String, u128) {
-    let now = std::time::Instant::now();
-
+    let now = Instant::now();
     match client
         .get(&address)
         .timeout(Duration::from_secs(5))
@@ -167,43 +226,40 @@ async fn test(client: reqwest::Client, address: String) -> (String, u128) {
     }
 }
 
-async fn downloader(
-    client: Arc<reqwest::Client>,
-    ua: String,
-    addresses: Arc<Vec<&'static str>>,
-) {
+async fn downloader(client: reqwest::Client) {
     loop {
         let best = BEST.lock().unwrap().clone();
-        let mut res = match client
+        let mut response = match client
             .get(best)
-            .header("User-Agent", &ua)
             .send()
             .await
+            .and_then(|res| res.error_for_status())
         {
-            Ok(res) => res,
-            Err(_) => {
-                // 连接失败: 重新选优后退出, 主循环会补位新线程
-                find_best(&client, &addresses).await;
-                DOWNLOADING.fetch_sub(1, Relaxed);
-                return;
-            }
+            Ok(response) => response,
+            Err(_) => return,
         };
-
+        let mut received = false;
         loop {
-            match res.chunk().await {
+            match response.chunk().await {
                 Ok(Some(chunk)) => {
-                    SPEED.fetch_add(chunk.len(), Relaxed);
+                    received |= !chunk.is_empty();
+                    DOWNLOADED.fetch_add(chunk.len() as u64, Relaxed);
                 }
-                Ok(None) => {
-                    break;
-                }
-                Err(_) => {
-                    // 连接中断: 重新选优后退出, 主循环会补位新线程
-                    find_best(&client, &addresses).await;
-                    DOWNLOADING.fetch_sub(1, Relaxed);
-                    return;
-                }
+                Ok(None) if received => break,
+                _ => return,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_flags_are_mutually_exclusive() {
+        assert!(Args::try_parse_from(["SpeedTest", "--cli"]).unwrap().cli);
+        assert!(Args::try_parse_from(["SpeedTest", "--tui"]).unwrap().tui);
+        assert!(Args::try_parse_from(["SpeedTest", "--cli", "--tui"]).is_err());
     }
 }
