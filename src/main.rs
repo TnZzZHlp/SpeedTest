@@ -3,10 +3,12 @@ mod ui;
 use clap::Parser;
 use std::{
     io::{self, IsTerminal, Write},
+    pin::Pin,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed},
         Mutex,
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tokio::task::JoinSet;
@@ -41,7 +43,12 @@ static OVERSEAS_ADDRESS: [&str; 8] = [
     "https://speedtest.dallas.linode.com/100MB-dallas.bin",
 ];
 
+const APPLE_DOWNLOAD_ADDRESS: &str = "https://mensura.cdn-apple.com/api/v1/gm/large";
+const APPLE_UPLOAD_ADDRESS: &str = "https://mensura.cdn-apple.com/api/v1/gm/slurp";
+static UPLOAD_CHUNK: [u8; 64 * 1024] = [0; 64 * 1024];
+
 static DOWNLOADED: AtomicU64 = AtomicU64::new(0);
+static UPLOADED: AtomicU64 = AtomicU64::new(0);
 static ERRORS: AtomicUsize = AtomicUsize::new(0);
 static BEST: Mutex<String> = Mutex::new(String::new());
 
@@ -142,7 +149,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let interval = now.duration_since(sampled);
                 if let Some(start) = started {
                     if interval >= Duration::from_secs(1) {
-                        dashboard.sample(DOWNLOADED.load(Relaxed), now - start, interval);
+                        dashboard.sample(
+                            DOWNLOADED.load(Relaxed),
+                            UPLOADED.load(Relaxed),
+                            now - start,
+                            interval,
+                        );
                         sampled = now;
                         if !use_tui {
                             writeln!(io::stdout(), "{}", dashboard.cli_line())?;
@@ -170,10 +182,19 @@ async fn measure(client: reqwest::Client, args: &Args) -> Result<(), Box<dyn std
         if args.overseas {
             addresses.extend(OVERSEAS_ADDRESS.map(String::from));
         }
+        addresses.push(APPLE_DOWNLOAD_ADDRESS.to_string());
         find_best(&client, &addresses).await?;
     }
 
-    // JoinSet 在退出时取消全部下载，避免后台任务脱离界面生命周期。
+    // Apple 的 /slurp 接收无限长的二进制 POST 请求；自定义下载地址不启用它。
+    let mut upload_workers = JoinSet::new();
+    if args.url.is_empty() {
+        for _ in 0..args.concurrency {
+            upload_workers.spawn(uploader(client.clone()));
+        }
+    }
+
+    // JoinSet 在退出时取消全部下载和上传，避免后台任务脱离界面生命周期。
     let mut workers = JoinSet::new();
     for _ in 0..args.concurrency {
         workers.spawn(downloader(client.clone()));
@@ -223,6 +244,37 @@ async fn test(client: reqwest::Client, address: String) -> (String, u128) {
     {
         Ok(res) if res.status().is_success() => (address, now.elapsed().as_millis()),
         _ => (address, u128::MAX),
+    }
+}
+
+struct UploadBody;
+
+impl futures_core::Stream for UploadBody {
+    type Item = Result<&'static [u8], io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        UPLOADED.fetch_add(UPLOAD_CHUNK.len() as u64, Relaxed);
+        Poll::Ready(Some(Ok(&UPLOAD_CHUNK)))
+    }
+}
+
+async fn uploader(client: reqwest::Client) {
+    loop {
+        let result = client
+            .post(APPLE_UPLOAD_ADDRESS)
+            .header("Accept-Encoding", "identity")
+            .header("Content-Type", "application/octet-stream")
+            .body(reqwest::Body::wrap_stream(UploadBody))
+            .send()
+            .await;
+        if let Ok(response) = result {
+            if response.status().is_success() {
+                let _ = response.bytes().await;
+                continue;
+            }
+        }
+        ERRORS.fetch_add(1, Relaxed);
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

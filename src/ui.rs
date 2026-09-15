@@ -25,10 +25,14 @@ pub struct Dashboard {
     group: &'static str,
     concurrency: usize,
     total: u64,
+    uploaded: u64,
     elapsed: Duration,
     speed: f64,
     average: f64,
     peak: f64,
+    upload_speed: f64,
+    upload_average: f64,
+    upload_peak: f64,
     history: VecDeque<f64>,
 }
 
@@ -40,19 +44,28 @@ impl Dashboard {
             group,
             concurrency,
             total: 0,
+            uploaded: 0,
             elapsed: Duration::ZERO,
             speed: 0.0,
             average: 0.0,
             peak: 0.0,
+            upload_speed: 0.0,
+            upload_average: 0.0,
+            upload_peak: 0.0,
             history: VecDeque::with_capacity(HISTORY_LEN),
         }
     }
 
-    pub fn sample(&mut self, total: u64, elapsed: Duration, interval: Duration) {
-        self.speed = total.saturating_sub(self.total) as f64 / interval.as_secs_f64().max(0.001);
+    pub fn sample(&mut self, total: u64, uploaded: u64, elapsed: Duration, interval: Duration) {
+        let seconds = interval.as_secs_f64().max(0.001);
+        self.speed = total.saturating_sub(self.total) as f64 / seconds;
+        self.upload_speed = uploaded.saturating_sub(self.uploaded) as f64 / seconds;
         self.average = total as f64 / elapsed.as_secs_f64().max(0.001);
+        self.upload_average = uploaded as f64 / elapsed.as_secs_f64().max(0.001);
         self.peak = self.peak.max(self.speed);
+        self.upload_peak = self.upload_peak.max(self.upload_speed);
         self.total = total;
+        self.uploaded = uploaded;
         self.elapsed = elapsed;
         if self.history.len() == HISTORY_LEN {
             self.history.pop_front();
@@ -62,12 +75,17 @@ impl Dashboard {
 
     pub fn cli_line(&self) -> String {
         format!(
-            "当前下载速度: {:.2} MB/s | {:.2} Mbps | 平均: {:.2} MB/s | 峰值: {:.2} MB/s | 已下载: {:.3} GB | 用时: {}s | 并发上限: {} | 重试: {} | 分组: {} | 地址: {}",
+            "下载: {:.2} MB/s ({:.2} Mbps) | 上传: {:.2} MB/s ({:.2} Mbps) | 下载平均: {:.2} MB/s | 上传平均: {:.2} MB/s | 下载峰值: {:.2} MB/s | 上传峰值: {:.2} MB/s | 已下载: {:.3} GB | 已上传: {:.3} GB | 用时: {}s | 并发上限: {} | 重试: {} | 分组: {} | 地址: {}",
             self.speed / 1_000_000.0,
             self.speed * 8.0 / 1_000_000.0,
+            self.upload_speed / 1_000_000.0,
+            self.upload_speed * 8.0 / 1_000_000.0,
             self.average / 1_000_000.0,
+            self.upload_average / 1_000_000.0,
             self.peak / 1_000_000.0,
+            self.upload_peak / 1_000_000.0,
             self.total as f64 / 1_000_000_000.0,
+            self.uploaded as f64 / 1_000_000_000.0,
             self.elapsed.as_secs(),
             self.concurrency,
             self.errors,
@@ -91,11 +109,15 @@ impl Dashboard {
         if area.width < 60 || area.height < 22 {
             frame.render_widget(
                 Paragraph::new(format!(
-                    "SpeedTest / {}\n{}\n\n{:.2} MB/s  /  {:.2} Mbps\n平均 {:.2}  峰值 {:.2} MB/s\n已下载 {:.3} GB / {}s\n并发上限 {} / 重试 {}\n{}\n\nQ / Esc / Ctrl+C 退出",
+                    "SpeedTest / {}\n{}\n\n下载 {:.2} MB/s / {:.2} Mbps\n上传 {:.2} MB/s / {:.2} Mbps\n下载平均 {:.2} / 峰值 {:.2} MB/s\n上传平均 {:.2} / 峰值 {:.2} MB/s\n已下载 {:.3} GB / 已上传 {:.3} GB / {}s\n并发上限 {} / 重试 {}\n{}\n\nQ / Esc / Ctrl+C 退出",
                     self.group, status, self.speed / 1_000_000.0,
-                    self.speed * 8.0 / 1_000_000.0, self.average / 1_000_000.0,
-                    self.peak / 1_000_000.0, self.total as f64 / 1_000_000_000.0,
-                    self.elapsed.as_secs(), self.concurrency, self.errors, self.address,
+                    self.speed * 8.0 / 1_000_000.0, self.upload_speed / 1_000_000.0,
+                    self.upload_speed * 8.0 / 1_000_000.0, self.average / 1_000_000.0,
+                    self.peak / 1_000_000.0, self.upload_average / 1_000_000.0,
+                    self.upload_peak / 1_000_000.0,
+                    self.total as f64 / 1_000_000_000.0,
+                    self.uploaded as f64 / 1_000_000_000.0, self.elapsed.as_secs(),
+                    self.concurrency, self.errors, self.address,
                 ))
                 .block(panel("网络测速"))
                 .wrap(Wrap { trim: false }),
@@ -136,16 +158,20 @@ impl Dashboard {
                 format!("{:.2} Mbps", self.speed * 8.0 / 1_000_000.0),
             ),
             (
-                " 平均速度 ",
-                self.average,
+                " 实时上传 ",
+                self.upload_speed,
                 GREEN,
-                "本次测速平均".to_string(),
+                format!("{:.2} Mbps", self.upload_speed * 8.0 / 1_000_000.0),
             ),
             (
-                " 峰值速度 ",
-                self.peak,
+                " 平均速度 ",
+                self.average,
                 Color::Rgb(192, 132, 252),
-                "最高采样速度".to_string(),
+                format!(
+                    "下 {:.2} / 上 {:.2} MB/s",
+                    self.average / 1_000_000.0,
+                    self.upload_average / 1_000_000.0
+                ),
             ),
         ]
         .into_iter()
@@ -205,11 +231,17 @@ impl Dashboard {
                     .into(),
                 ]),
                 Line::from(format!(
-                    "已下载  {:.3} GB    运行时间  {:02}:{:02}:{:02}",
+                    "已下载  {:.3} GB    已上传  {:.3} GB    运行时间  {:02}:{:02}:{:02}",
                     self.total as f64 / 1_000_000_000.0,
+                    self.uploaded as f64 / 1_000_000_000.0,
                     self.elapsed.as_secs() / 3600,
                     self.elapsed.as_secs() / 60 % 60,
                     self.elapsed.as_secs() % 60
+                )),
+                Line::from(format!(
+                    "下载峰值 {:.2} MB/s    上传峰值 {:.2} MB/s",
+                    self.peak / 1_000_000.0,
+                    self.upload_peak / 1_000_000.0
                 )),
                 Line::from(self.address.as_str()).fg(MUTED),
             ])
@@ -283,16 +315,17 @@ mod tests {
     #[test]
     fn rates_history_and_layouts() {
         let mut dashboard = Dashboard::new("国内", 4);
-        dashboard.sample(4_000_000, Duration::from_secs(2), Duration::from_secs(2));
+        dashboard.sample(4_000_000, 0, Duration::from_secs(2), Duration::from_secs(2));
         assert_eq!(dashboard.speed, 2_000_000.0);
         assert_eq!(dashboard.average, 2_000_000.0);
         assert!(dashboard.cli_line().contains("16.00 Mbps"));
-        dashboard.sample(4_000_000, Duration::from_secs(3), Duration::from_secs(1));
+        dashboard.sample(4_000_000, 0, Duration::from_secs(3), Duration::from_secs(1));
         assert_eq!(dashboard.speed, 0.0);
         assert_eq!(dashboard.peak, 2_000_000.0);
         for second in 4..150 {
             dashboard.sample(
                 4_000_000,
+                0,
                 Duration::from_secs(second),
                 Duration::from_secs(1),
             );
